@@ -221,13 +221,18 @@ def create_tables():
                         dire_players TEXT, result TEXT, date TEXT, time TEXT, description TEXT
                     )
                 ''')
-                cur.execute('''
+                  cur.execute('''
                     CREATE TABLE IF NOT EXISTS player_game_stats (
                         id SERIAL PRIMARY KEY, game_id INTEGER, player_nickname TEXT, hero TEXT,
                         kills INTEGER, deaths INTEGER, assists INTEGER, team TEXT, position INTEGER DEFAULT 0,
+                        rating_delta INTEGER DEFAULT 0,
                         FOREIGN KEY (game_id) REFERENCES games(id) ON DELETE CASCADE
                     )
                 ''')
+                cur.execute("""
+                    ALTER TABLE player_game_stats
+                    ADD COLUMN IF NOT EXISTS rating_delta INTEGER DEFAULT 0
+                """)
                 cur.execute('''
                     CREATE TABLE IF NOT EXISTS player_heroes (
                         id SERIAL PRIMARY KEY, player_nickname TEXT, hero_name TEXT,
@@ -689,12 +694,15 @@ def show_all_games(message):
         return
     text = f"🎮 ПОСЛЕДНИЕ ИГРЫ\n" + "=" * 50 + "\n"
     text += f"Всего: {len(games)} игр\n\n"
-    for idx, (game_id, sfid, r_pl, d_pl, result, date, time_str, desc) in enumerate(games, 1):
-        r_emoji = "🔴" if result == "radiant" else "🔴"
+   for idx, (game_id, sfid, r_pl, d_pl, result, date, time_str, desc) in enumerate(games, 1):
+        r_emoji = "🟢" if result == "radiant" else "🔴"
         text += f"{idx}. {r_emoji} {result.upper()} WIN\n"
         text += f"    🟢 Radiant: {r_pl}\n"
         text += f"    🔴 Dire: {d_pl}\n"
-        text += f"    📅 {date} ⏰ {time_str}\n\n"
+        text += f"    📅 {date} ⏰ {time_str}\n"
+        if desc and desc.strip():
+            text += f"    📝 {desc.strip()}\n"
+        text += "\n"
     try:
         bot.reply_to(message, text)
         for game_id, sfid, r_pl, d_pl, result, date, time_str, desc in games:
@@ -794,8 +802,7 @@ def create_match(call):
     radiant, dire = balance_teams(selected_players) 
     
     text = "⚔️ СБАЛАНСИРОВАННЫЙ МАТЧ (по Ролям, MMR и WR)\n\n"
-    text += "🟢
-    RADIANT:\n"
+    text += "🟢 RADIANT:\n"
     radiant_total_wr = 0
     radiant_total_mmr = 0
     for p in radiant:
@@ -1174,24 +1181,32 @@ def handle_add_hero_input(message):
     try:
         with conn:
             with conn.cursor() as cur:
-                parts = text.split()
-                if len(parts) < 8:
+                tokens = text.rsplit(maxsplit=6)
+                # Разбиваем строку только на ник и остальную часть, чтобы имя героя могло содержать пробелы
+                parts = text.split(maxsplit=1)
+                if len(parts) < 2:
                     bot.send_message(chat_id, "❌ Неверный формат. Используйте:\n<code>nickname hero position wins losses kills deaths assists</code>")
                     return
-                nickname = parts[0]
-                hero_name = parts[1]
+                nickname, rest = parts[0], parts[1].strip()
+                # Отделяем имя героя слева и 6 числовых показателей справа
+                hero_and_stats = rest.rsplit(maxsplit=6)
+                if len(hero_and_stats) != 7:
+                    bot.send_message(chat_id, "❌ Неверный формат. Используйте:\n<code>nickname hero position wins losses kills deaths assists</code>")
+                    return
+                hero_name = hero_and_stats[0].strip()
+                if not hero_name:
+                    bot.send_message(chat_id, "❌ Укажите название героя после ника игрока.")
+                    return
                 try:
-                    position = int(parts[2])
-                    wins = int(parts[3])
-                    losses = int(parts[4])
-                    kills = int(parts[5])
-                    deaths = int(parts[6])
-                    assists = int(parts[7])
-                except (ValueError, IndexError):
+                    position, wins, losses, kills, deaths, assists = map(int, hero_and_stats[1:])
+                except ValueError:
                     bot.send_message(chat_id, "❌ Ошибка в числовых значениях. Используйте числа для позиции и статистики.")
                     return
                 if position not in POSITIONS:
                     bot.send_message(chat_id, f"❌ Неверная позиция {position}! Используйте 1-5.")
+                    return
+                if any(value < 0 for value in (wins, losses, kills, deaths, assists)):
+                    bot.send_message(chat_id, "❌ Статистика не может содержать отрицательные значения.")
                     return
                 cur.execute('SELECT nickname FROM players WHERE nickname=%s', (nickname,))
                 if not cur.fetchone():
@@ -1229,13 +1244,17 @@ def handle_add_hero_input(message):
         position_name = POSITIONS.get(position, "?")
         total_games = wins + losses
         wr = round((wins / total_games * 100), 1) if total_games > 0 else 0
-        kda = round((kills + assists) / deaths, 2) if deaths > 0 else (kills + assists)
+        if deaths > 0:
+            kda_value = round((kills + assists) / deaths, 2)
+            kda_str = f"{kda_value:.2f}"
+        else:
+            kda_str = "∞" if (kills + assists) > 0 else "0"
         success_text = f"✅ <b>ГЕРОЙ ДОБАВЛЕН УСПЕШНО!</b>\n\n"
         success_text += f"👤 Игрок: <b>{nickname}</b>\n"
         success_text += f"⚔️ Герой: <b>{hero_name}</b>\n"
         success_text += f"🎯 Позиция: <b>{position_name}</b>\n\n"
         success_text += f"📊 W/L: <b>{wins}/{losses}</b> | WR: <b>{wr}%</b>\n"
-        success_text += f"📊 KDA: <b>{kills}/{deaths}/{assists}</b> = {kda}\n\n"
+        success_text += f"📊 KDA: <b>{kills}/{deaths}/{assists}</b> = {kda_str}\n\n"
         success_text += f"💰 Рейтинг: <b>{rating_change:+d}</b> | Роль: <b>+{wins}W +{losses}L</b>"
         bot.send_message(chat_id, success_text)
         player_cache.invalidate() # <-- ОБНОВЛЯЕМ КЭШ
@@ -1709,8 +1728,10 @@ def done_dire(call):
         state["current_player"] = current_player
         bot.send_message(
             chat_id,
-            f"🟢 Введите данные для {current_player} (Radiant)\n\n"
-            f"Формат: Герой Убийства Смерти Ассисты\nПример: Anti-Mage 10 3 15"
+            (
+                f"🟢 Введите данные для {current_player} (Radiant)\n\n"
+                "Формат: Герой Убийства Смерти Ассисты\nПример: Anti-Mage 10 3 15"
+            )
         )
     else:
         show_result_selection(chat_id, state)
@@ -1799,27 +1820,56 @@ def handle_game_role_selection(call):
             if state["current_player_index"] < len(state["radiant_selected"]):
                 current_player = state["radiant_selected"][state["current_player_index"]]
                 state["current_player"] = current_player
-                bot.edit_message_text(f"✅ Роль выбрана!\n\n🟢 Введите данные для {current_player} (Radiant)\n\n"
-                                      f"Формат: Герой Убийства Смерти Ассисты", chat_id, call.message.message_id)
+                message_text = (
+                    f"✅ Роль выбрана!\n\n🟢 Введите данные для {current_player} (Radiant)\n\n"
+                    "Формат: Герой Убийства Смерти Ассисты"
+                )
+                bot.edit_message_text(message_text, chat_id=chat_id, message_id=call.message.message_id),
+                    chat_id=chat_id,
+                    message_id=call.message.message_id
+                )
             else:
                 state["current_team"] = "dire"
                 state["current_player_index"] = 0
                 if state["dire_selected"]:
                     current_player = state["dire_selected"][0]
                     state["current_player"] = current_player
-                    bot.edit_message_text(f"✅ Роль выбрана!\n\n🔴 Введите данные для {current_player} (Dire)\n\n"
-                                          f"Формат: Герой Убийства Смерти Ассисты", chat_id, call.message.message_id)
+                    message_text = (
+                        f"✅ Роль выбрана!\n\n🔴 Введите данные для {current_player} (Dire)\n\n"
+                        "Формат: Герой Убийства Смерти Ассисты"
+                    )
+                    bot.edit_message_text(message_text, chat_id=chat_id, message_id=call.message.message_id)
                 else:
-                    bot.edit_message_text("✅ Роль выбрана!", chat_id, call.message.message_id)
+                    bot.edit_message_text("✅ Роль выбрана!", chat_id=chat_id, message_id=call.message.message_id)
                     show_result_selection(chat_id, state)
         else:
             if state["current_player_index"] < len(state["dire_selected"]):
                 current_player = state["dire_selected"][state["current_player_index"]]
                 state["current_player"] = current_player
-                bot.edit_message_text(f"✅ Роль выбрана!\n\n🔴 Введите данные для {current_player} (Dire)\n\n"
-                                      f"Формат: Герой Убийства Смерти Ассисты", chat_id, call.message.message_id)
+                message_text = (
+                    f"✅ Роль выбрана!\n\n🔴 Введите данные для {current_player} (Dire)\n\n"
+                    "Формат: Герой Убийства Смерти Ассисты"
+                )
+                bot.edit_message_text(message_text, chat_id=chat_id, message_id=call.message.message_id)
             else:
-                bot.edit_message_text("✅ Роль выбрана!", chat_id, call.message.message_id)
+                bot.edit_message_text("✅ Роль выбрана!", chat_id=chat_id, message_id=call.message.message_id)
+                show_result_selection(chat_id, state)
+        else:
+            if state["current_player_index"] < len(state["dire_selected"]):
+                current_player = state["dire_selected"][state["current_player_index"]]
+                state["current_player"] = current_player
+                bot.edit_message_text(
+                    f"✅ Роль выбрана!\n\n🔴 Введите данные для {current_player} (Dire)\n\n"
+                    f"Формат: Герой Убийства Смерти Ассисты",
+                    chat_id=chat_id,
+                    message_id=call.message.message_id
+                )
+            else:
+                bot.edit_message_text(
+                    "✅ Роль выбрана!",
+                    chat_id=chat_id,
+                    message_id=call.message.message_id
+                )
                 show_result_selection(chat_id, state)
     except Exception as e:
         bot.send_message(chat_id, f"❌ Ошибка: {str(e)}")
@@ -2406,4 +2456,5 @@ print("🌐 [MAIN] Flask-сервер (gunicorn) готов к запуску.")
 
 if __name__ == "__main__":
     print("🔴 [LOCAL] Запускаем бота локально (НЕ GUNICORN)...")
+
     run_bot_polling()
