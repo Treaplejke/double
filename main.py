@@ -221,7 +221,7 @@ def create_tables():
                         dire_players TEXT, result TEXT, date TEXT, time TEXT, description TEXT
                     )
                 ''')
-                  cur.execute('''
+                cur.execute('''
                     CREATE TABLE IF NOT EXISTS player_game_stats (
                         id SERIAL PRIMARY KEY, game_id INTEGER, player_nickname TEXT, hero TEXT,
                         kills INTEGER, deaths INTEGER, assists INTEGER, team TEXT, position INTEGER DEFAULT 0,
@@ -2458,3 +2458,4 @@ if __name__ == "__main__":
     print("🔴 [LOCAL] Запускаем бота локально (НЕ GUNICORN)...")
 
     run_bot_polling()
+
